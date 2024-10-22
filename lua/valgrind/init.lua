@@ -5,6 +5,7 @@ function M.setup(opts)
 
     vim.api.nvim_create_user_command("Valgrind", M.run_valgrind, { nargs = 1 })
     vim.api.nvim_create_user_command("ValgrindLoadXml", M.valgrind_load_xml, { nargs = 1 })
+    vim.api.nvim_create_user_command("SanitizerLoadLog", M.sanitizer_load_log, { nargs = 1 })
 end
 
 local function starts_with(str, start)
@@ -34,36 +35,36 @@ local summarize_rw = function(rw)
 end
 
 local summarize_table_keys = function(t, show_only_first_entry)
-    local s = {}
+    local sorted_t = {}
     local n = 0
     for k, _ in pairs(t) do
-        table.insert(s, k)
+        table.insert(sorted_t, k)
         n = n + 1
     end
-    table.sort(s)
+    table.sort(sorted_t)
     if n == 1 then
-        return s[1]
+        return sorted_t[1]
     elseif show_only_first_entry then
-        return s[1] .. "/..."
+        return sorted_t[1] .. "/..."
     else
-        return table.concat(s, '/')
+        return table.concat(sorted_t, '/')
     end
 end
 
 local summarize_links = function(link)
-    local s = {}
+    local sorted_links = {}
     for k, _ in pairs(link) do
-        table.insert(s, k)
+        table.insert(sorted_links, k)
     end
-    table.sort(s)
+    table.sort(sorted_links)
     local summary = ""
     local prev_filename = ""
     local has_end = false
-    for _, l in pairs(s) do
-        if l == "END" then
+    for _, full_link in pairs(sorted_links) do
+        if full_link == "END" then
             has_end = true
         else
-            local filename, line_number = string.match(l, "^(.*):(%d+)$")
+            local filename, line_number = string.match(full_link, "^(.*):(%d+)$")
             if filename == prev_filename then
                 summary = summary .. "," .. line_number
             else
@@ -95,8 +96,8 @@ M.extract_valgrind_error = function(xml_file, error_file)
     parser:parse(xml2lua.loadFile(xml_file))
 
     -- TODO: Clean up the code.
-    local h = io.open(error_file, "w")
-    if not h then
+    local error_file_handle = io.open(error_file, "w")
+    if not error_file_handle then
         print("Failed to open error file: " .. error_file)
         return
     end
@@ -106,6 +107,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
     end
     local output_table = {}
     local data_race_map = {}
+    -- TODO: Show progress to the user somehow.
     for _, e in pairs(error) do
         if not e.kind then goto not_error_continue end
         if not e.stack then goto not_error_continue end
@@ -183,9 +185,9 @@ M.extract_valgrind_error = function(xml_file, error_file)
     -- TODO: sort the line numbers properly.
     table.sort(output_table)
     for _, output_line in pairs(output_table) do
-        h:write(output_line .. "\n")
+        error_file_handle:write(output_line .. "\n")
     end
-    h:close()
+    error_file_handle:close()
 end
 
 M.run_valgrind = function(args)
@@ -211,6 +213,85 @@ M.valgrind_load_xml = function(args)
     vim.bo.efm = efm
 
     -- print("Valgrind error log written to: " .. error_file)
+    vim.fn.delete(error_file)
+end
+
+M.sanitizer_load_log = function(args)
+    local log_file = args.args
+    local error_file = vim.fn.tempname()
+
+    local log_file_handle = io.open(log_file, "r")
+    if not log_file_handle then
+        print("Failed to read sanitizer log file: " .. log_file)
+        return
+    end
+    local error_file_handle = io.open(error_file, "w")
+    if not error_file_handle then
+        print("Failed to open error file: " .. error_file)
+        return
+    end
+
+    local message = "NO MESSAGE"
+    local last_addr = "NO ADDRESS"
+    local error_map = {}
+    local target
+    local prev_target
+    for line in log_file_handle:lines() do
+        if starts_with(line, "allocated by") then
+            message = last_addr .. " " .. line
+            prev_target = nil
+        elseif not starts_with(line, "    #") then
+            message = line
+            prev_target = nil
+            local addr = string.match(line, "(0x%x+)")
+            if addr then
+                last_addr = addr
+            end
+        else
+            target = string.match(line, "#%d+ 0x%x+ .* (.+)")  -- ASAN format
+            if not target then
+                target = string.match(line, "#%d+ .* (.+) %(.+%)")  -- TSAN format
+            end
+            if not target then
+                print("Failed to parse link target from line:\n" .. line)
+                goto not_source_file_continue
+                -- return
+            end
+            if not string.match(target, "%S+:%d+") or not starts_with(target, "/home/") then -- TODO: Use git_root instead!
+                goto not_source_file_continue
+            end
+            local key = target .. ":" .. message
+            if not error_map[key] then
+                error_map[key] = { link = {} }
+            end
+            if prev_target then
+                error_map[key].link["->" .. prev_target] = true
+            else
+                error_map[key].link['END'] = true
+            end
+            prev_target = string.match(target, ".*/(.+)")
+        end
+        ::not_source_file_continue::
+    end
+    log_file_handle:close()
+
+    local output_table = {}
+    for key, value in pairs(error_map) do
+        table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
+    end
+    -- TODO: sort the line numbers properly.
+    table.sort(output_table)
+    for _, output_line in pairs(output_table) do
+        error_file_handle:write(output_line .. "\n")
+    end
+    error_file_handle:close()
+
+    local efm = vim.bo.efm
+    vim.bo.efm = "%f:%l:%m"
+    vim.cmd("cfile " .. error_file)
+    vim.bo.efm = efm
+
+    -- print("Sanitizer error log written to: " .. error_file)
     vim.fn.delete(error_file)
 end
 
