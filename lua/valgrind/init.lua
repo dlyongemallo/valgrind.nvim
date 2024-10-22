@@ -11,7 +11,29 @@ local function starts_with(str, start)
     return str:sub(1, #start) == start
 end
 
-local summarize_table_keys = function(t)
+local summarize_rw = function(rw)
+    local has_read = false
+    local has_write = false
+    for k, _ in pairs(rw) do
+        if k == "read" then
+            has_read = true
+        elseif k == "write" then
+            has_write = true
+        end
+        if has_read and has_write then
+            return "read/write"
+        end
+    end
+    if has_read then
+        return "read"
+    elseif has_write then
+        return "write"
+    else
+        return "unknown operation"
+    end
+end
+
+local summarize_table_keys = function(t, show_only_first_entry)
     local s = {}
     local n = 0
     for k, _ in pairs(t) do
@@ -21,11 +43,45 @@ local summarize_table_keys = function(t)
     table.sort(s)
     if n == 1 then
         return s[1]
-    elseif n == 2 then
-        return s[1] .. "/" .. s[2]
+    elseif show_only_first_entry then
+        return s[1] .. "/..."
     else
-        return s[1] .. "/" .. s[2] .. "/..."
+        return table.concat(s, '/')
     end
+end
+
+local summarize_links = function(link)
+    local s = {}
+    for k, _ in pairs(link) do
+        table.insert(s, k)
+    end
+    table.sort(s)
+    local summary = ""
+    local prev_filename = ""
+    local has_end = false
+    for _, l in pairs(s) do
+        if l == "END" then
+            has_end = true
+        else
+            local filename, line_number = string.match(l, "^(.*):(%d+)$")
+            if filename == prev_filename then
+                summary = summary .. "," .. line_number
+            else
+                if prev_filename ~= "" then
+                    summary = summary .. "/"
+                end
+                summary = summary .. filename .. ":" .. line_number
+                prev_filename = filename
+            end
+        end
+    end
+    if has_end then
+        if summary ~= "" then
+            summary = summary .. "/"
+        end
+        summary = summary .. "END"
+    end
+    return summary
 end
 
 -- TODO: Investigate why this doesn't work on calls subsequent to the first call.
@@ -118,11 +174,11 @@ M.extract_valgrind_error = function(xml_file, error_file)
     -- print(data_race_map)
     for key, value in pairs(data_race_map) do
         table.insert(output_table, string.format(key .. ":[Race] Possible data race during %s of size %s at %s by thread %s (%s)",
-            summarize_table_keys(value.rw),
-            summarize_table_keys(value.size),
-            summarize_table_keys(value.addr),
-            summarize_table_keys(value.thr),
-            summarize_table_keys(value.link)))
+            summarize_rw(value.rw),
+            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.addr, true),
+            summarize_table_keys(value.thr, false),
+            summarize_links(value.link)))
     end
     -- TODO: sort the line numbers properly.
     table.sort(output_table)
