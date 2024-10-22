@@ -245,6 +245,7 @@ M.sanitizer_load_log = function(args)
     local general_map = {}
     local rw_op_map = {}
     local mutex_created_map = {}
+    local heap_allocation_map = {}
     local target
     local prev_target
     for line in log_file_handle:lines() do
@@ -271,12 +272,13 @@ M.sanitizer_load_log = function(args)
             if not string.match(target, "%S+:%d+") or not starts_with(target, "/home/") then -- TODO: Use git_root instead!
                 goto not_source_file_continue
             end
-            local rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
-            local mutex = string.match(message, "^%s*Mutex (.*) created at:$")
+
+            local key, rw_op, size, addr, thr, mutex
+            rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
             if rw_op then
                 -- TODO: This should probably be controlled by a "compactify" option.
                 -- "Read/Write/Previous read/Previous write" operations.
-                local key = target
+                key = target
                 if not rw_op_map[key] then
                     rw_op_map[key] = { rw_op = {}, size = {}, addr = {}, thr = {}, misc = {}, link = {} }
                 end
@@ -285,24 +287,43 @@ M.sanitizer_load_log = function(args)
                 rw_op_map[key].addr[addr] = true
                 rw_op_map[key].thr[thr] = true
                 populate_link(rw_op_map[key].link, prev_target)
+                goto finished_with_line_continue
+            end
 
-            elseif mutex then
+            mutex = string.match(message, "^%s*Mutex (.*) created at:$")
+            if mutex then
                 -- Mutex creation.
-                local key = target
+                key = target
                 if not mutex_created_map[key] then
                     mutex_created_map[key] = { mutex = {}, link = {} }
                 end
                 mutex_created_map[key].mutex[mutex] = true
                 populate_link(mutex_created_map[key].link, prev_target)
-                    
-            else
-                -- Other general messages.
-                local key = target .. ":" .. message
-                if not general_map[key] then
-                    general_map[key] = { link = {} }
-                end
-                populate_link(general_map[key].link, prev_target)
+                goto finished_with_line_continue
             end
+
+            size, addr, thr = string.match(message, "^%s*Location is heap block of size (%d+) at (0x%x+) allocated by (.*):$")
+            if size then
+                -- Heap block allocation.
+                key = target
+                if not heap_allocation_map[key] then
+                    heap_allocation_map[key] = { size = {}, addr = {}, thr = {}, link = {} }
+                end
+                heap_allocation_map[key].size[size] = true
+                heap_allocation_map[key].addr[addr] = true
+                heap_allocation_map[key].thr[thr] = true
+                populate_link(heap_allocation_map[key].link, prev_target)
+                goto finished_with_line_continue
+            end
+
+            -- Other general messages.
+            key = target .. ":" .. message
+            if not general_map[key] then
+                general_map[key] = { link = {} }
+            end
+            populate_link(general_map[key].link, prev_target)
+
+            ::finished_with_line_continue::
             prev_target = string.match(target, ".*/(.+)")
         end
         ::not_source_file_continue::
@@ -327,6 +348,16 @@ M.sanitizer_load_log = function(args)
         table.insert(output_table, string.format(key ..
             ":Mutex %s created: (%s)",
             summarize_table_keys(value.mutex, false),
+            summarize_links(value.link)))
+    end
+    -- print("heap_allocation_map:\n")
+    -- print(heap_allocation_map)
+    for key, value in pairs(heap_allocation_map) do
+        table.insert(output_table, string.format(key ..
+            ":Location is heap block of size %s at %s allocated by %s: (%s)",
+            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.addr, true),
+            summarize_table_keys(value.thr, false),
             summarize_links(value.link)))
     end
     -- print("general_map:\n")
