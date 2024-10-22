@@ -4,33 +4,55 @@ function M.setup(opts)
     opts = opts or {}
 
     vim.api.nvim_create_user_command("Valgrind", M.run_valgrind, { nargs = 1 })
-    vim.api.nvim_create_user_command("ValgrindLoadXml", M.load_xml, { nargs = 1 })
+    vim.api.nvim_create_user_command("ValgrindLoadXml", M.valgrind_load_xml, { nargs = 1 })
 end
 
 local function starts_with(str, start)
     return str:sub(1, #start) == start
 end
 
+local summarize_table_keys = function(t)
+    local s = {}
+    local n = 0
+    for k, _ in pairs(t) do
+        table.insert(s, k)
+        n = n + 1
+    end
+    table.sort(s)
+    if n == 1 then
+        return s[1]
+    elseif n == 2 then
+        return s[1] .. "/" .. s[2]
+    else
+        return s[1] .. "/" .. s[2] .. "/..."
+    end
+end
+
 -- TODO: Investigate why this doesn't work on calls subsequent to the first call.
-M.extract_error = function(filexml, fileerr)
+M.extract_valgrind_error = function(xml_file, error_file)
     -- TODO: Use luarocks for this. See: https://github.com/theHamsta/nvim_rocks
     local xml2lua = require("valgrind.lib.xml2lua.xml2lua")
     local handler = require("valgrind.lib.xml2lua.xmlhandler.tree")
 
     -- TODO: Check that the following supports valgrind tools other than memcheck and helgrind.
     local parser = xml2lua.parser(handler)
-    parser:parse(xml2lua.loadFile(filexml))
+    parser:parse(xml2lua.loadFile(xml_file))
 
     -- TODO: Clean up the code.
-    local h = io.open(fileerr, "w")
+    local h = io.open(error_file, "w")
+    if not h then
+        print("Failed to open error file: " .. error_file)
+        return
+    end
     local error = handler.root.valgrindoutput
     if error.error and #error.error > 1 then
         error = error.error
     end
+    local output_table = {}
+    local data_race_map = {}
     for _, e in pairs(error) do
         if not e.kind then goto not_error_continue end
         if not e.stack then goto not_error_continue end
-        local output = ""
         local stack = e
         if stack.stack and #stack.stack > 1 then
            stack = stack.stack
@@ -46,38 +68,68 @@ M.extract_error = function(filexml, fileerr)
             for _, f in pairs(frame) do
                 if not f.dir or not f.file then goto not_file_continue end
                 if not starts_with(f.dir, "/home/") then goto not_file_continue end -- TODO: Use git_root instead!
-                output = output .. f.dir .. "/"
+                local output_line = f.dir .. "/"
                 target = f.file .. ":"
                 if f.line then
                     target = target .. f.line
                 else
                     target = target .. "1"
                 end
-                output = output .. target .. ":"
+                output_line = output_line .. target .. ":"
                 if e.kind then
-                    output = output .. "[" .. e.kind .. "] "
+                    output_line = output_line .. "[" .. e.kind .. "] "
                 end
                 if e.what then
-                    output = output .. e.what
+                    output_line = output_line .. e.what
                 elseif e.xwhat then
-                    output = output .. e.xwhat.text
+                    output_line = output_line .. e.xwhat.text
                 end
                 if prev_target then
-                    output = output .. " (->" .. prev_target .. ")"
+                    output_line = output_line .. " (->" .. prev_target .. ")"
                 else
-                    output = output .. " (END)" -- reached bottom of call stack
+                    output_line = output_line .. " (END)" -- reached bottom of call stack
                 end
-                output = output .. "\n"
+                if output_line:find("%[Race%] Possible data race") then
+                    -- TODO: This should probably be controlled by a "compactify" option.
+                    local file, line, rw, size, addr, thr, link = string.match(output_line,
+                        "^(.*):(%d+):%[Race%] Possible data race during (.*) of size (%d+) at (0x%x+) by thread (#%d+) %((.*)%)")
+                    local key = file .. ":" .. line
+                    -- print(key)
+                    if not data_race_map[key] then
+                        data_race_map[key] = { rw = {}, size = {}, addr = {}, thr = {}, link = {} }
+                    end
+                    data_race_map[key].rw[rw] = true
+                    data_race_map[key].size[size] = true
+                    data_race_map[key].addr[addr] = true
+                    data_race_map[key].thr[thr] = true
+                    data_race_map[key].link[link] = true
+
+                else
+                    table.insert(output_table, output_line)
+                end
                 prev_target = target
                 ::not_file_continue::
             end
             ::not_frame_continue::
         end
-        if h then h:write(output) end
         ::not_error_continue::
     end
-    if h then h:close() end
-
+    -- print("data_race_map:\n")
+    -- print(data_race_map)
+    for key, value in pairs(data_race_map) do
+        table.insert(output_table, string.format(key .. ":[Race] Possible data race during %s of size %s at %s by thread %s (%s)",
+            summarize_table_keys(value.rw),
+            summarize_table_keys(value.size),
+            summarize_table_keys(value.addr),
+            summarize_table_keys(value.thr),
+            summarize_table_keys(value.link)))
+    end
+    -- TODO: sort the line numbers properly.
+    table.sort(output_table)
+    for _, output_line in pairs(output_table) do
+        h:write(output_line .. "\n")
+    end
+    h:close()
 end
 
 M.run_valgrind = function(args)
@@ -86,21 +138,23 @@ M.run_valgrind = function(args)
     local valgrind_cmd_line = "!valgrind --num-callers=500 --xml=yes --xml-file=" .. xml_file .. " " .. args.args
 
     vim.cmd(valgrind_cmd_line)
-    M.load_xml({args = xml_file})
+    M.valgrind_load_xml({args = xml_file})
 
+    -- print("Valgrind xml output written to: " .. xml_file)
     vim.fn.delete(xml_file)
 end
 
-M.load_xml = function(args)
+M.valgrind_load_xml = function(args)
     local xml_file = args.args
     local error_file = vim.fn.tempname()
 
-    M.extract_error(xml_file, error_file)
+    M.extract_valgrind_error(xml_file, error_file)
     local efm = vim.bo.efm
     vim.bo.efm = "%f:%l:%m"
     vim.cmd("cfile " .. error_file)
     vim.bo.efm = efm
 
+    -- print("Valgrind error log written to: " .. error_file)
     vim.fn.delete(error_file)
 end
 
