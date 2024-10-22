@@ -1,6 +1,6 @@
 # valgrind.nvim
 
-A neovim plugin for valgrind (memcheck and helgrind) integration.
+A neovim plugin for valgrind (memcheck and helgrind) and sanitizers (address and thread) integration.
 
 ## Installation
 
@@ -19,6 +19,7 @@ require('valgrind').setup()
 ```vim
 :Valgrind <command>
 :ValgrindLoadXml <xml-file>
+:SanitizerLoadLog <log-file>
 ```
 The output will be populated into the quickfix list.
 
