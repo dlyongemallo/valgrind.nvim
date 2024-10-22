@@ -216,6 +216,15 @@ M.valgrind_load_xml = function(args)
     vim.fn.delete(error_file)
 end
 
+local populate_link = function(link, prev_target)
+    if prev_target then
+        link["->" .. prev_target] = true
+    else
+        link['END'] = true
+    end
+
+end
+
 M.sanitizer_load_log = function(args)
     local log_file = args.args
     local error_file = vim.fn.tempname()
@@ -233,8 +242,9 @@ M.sanitizer_load_log = function(args)
 
     local message = "NO MESSAGE"
     local last_addr = "NO ADDRESS"
-    local error_map = {}
+    local general_map = {}
     local rw_op_map = {}
+    local mutex_created_map = {}
     local target
     local prev_target
     for line in log_file_handle:lines() do
@@ -262,6 +272,7 @@ M.sanitizer_load_log = function(args)
                 goto not_source_file_continue
             end
             local rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
+            local mutex = string.match(message, "^%s*Mutex (.*) created at:$")
             if rw_op then
                 -- TODO: This should probably be controlled by a "compactify" option.
                 -- "Read/Write/Previous read/Previous write" operations.
@@ -273,22 +284,24 @@ M.sanitizer_load_log = function(args)
                 rw_op_map[key].size[size] = true
                 rw_op_map[key].addr[addr] = true
                 rw_op_map[key].thr[thr] = true
-                if prev_target then
-                    rw_op_map[key].link["->" .. prev_target] = true
-                else
-                    rw_op_map[key].link['END'] = true
+                populate_link(rw_op_map[key].link, prev_target)
+
+            elseif mutex then
+                -- Mutex creation.
+                local key = target
+                if not mutex_created_map[key] then
+                    mutex_created_map[key] = { mutex = {}, link = {} }
                 end
+                mutex_created_map[key].mutex[mutex] = true
+                populate_link(mutex_created_map[key].link, prev_target)
+                    
             else
-                -- Other errors.
+                -- Other general messages.
                 local key = target .. ":" .. message
-                if not error_map[key] then
-                    error_map[key] = { link = {} }
+                if not general_map[key] then
+                    general_map[key] = { link = {} }
                 end
-                if prev_target then
-                    error_map[key].link["->" .. prev_target] = true
-                else
-                    error_map[key].link['END'] = true
-                end
+                populate_link(general_map[key].link, prev_target)
             end
             prev_target = string.match(target, ".*/(.+)")
         end
@@ -301,16 +314,24 @@ M.sanitizer_load_log = function(args)
     -- print(rw_op_map)
     for key, value in pairs(rw_op_map) do
         table.insert(output_table, string.format(key ..
-            ": %s of size %s at %s by thread %s: (%s)",
+            ":%s of size %s at %s by thread %s: (%s)",
             summarize_table_keys(value.rw_op, false),
             summarize_table_keys(value.size, false),
             summarize_table_keys(value.addr, true),
             summarize_table_keys(value.thr, false),
             summarize_links(value.link)))
     end
-    -- print("error_map:\n")
-    -- print(error_map)
-    for key, value in pairs(error_map) do
+    -- print("mutex_created_map:\n")
+    -- print(mutex_created_map)
+    for key, value in pairs(mutex_created_map) do
+        table.insert(output_table, string.format(key ..
+            ":Mutex %s created: (%s)",
+            summarize_table_keys(value.mutex, false),
+            summarize_links(value.link)))
+    end
+    -- print("general_map:\n")
+    -- print(general_map)
+    for key, value in pairs(general_map) do
         table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
     -- TODO: sort the line numbers properly.
