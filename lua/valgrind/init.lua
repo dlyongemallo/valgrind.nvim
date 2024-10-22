@@ -234,6 +234,7 @@ M.sanitizer_load_log = function(args)
     local message = "NO MESSAGE"
     local last_addr = "NO ADDRESS"
     local error_map = {}
+    local rw_op_map = {}
     local target
     local prev_target
     for line in log_file_handle:lines() do
@@ -260,14 +261,34 @@ M.sanitizer_load_log = function(args)
             if not string.match(target, "%S+:%d+") or not starts_with(target, "/home/") then -- TODO: Use git_root instead!
                 goto not_source_file_continue
             end
-            local key = target .. ":" .. message
-            if not error_map[key] then
-                error_map[key] = { link = {} }
-            end
-            if prev_target then
-                error_map[key].link["->" .. prev_target] = true
+            local rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
+            if rw_op then
+                -- TODO: This should probably be controlled by a "compactify" option.
+                -- "Read/Write/Previous read/Previous write" operations.
+                local key = target
+                if not rw_op_map[key] then
+                    rw_op_map[key] = { rw_op = {}, size = {}, addr = {}, thr = {}, misc = {}, link = {} }
+                end
+                rw_op_map[key].rw_op[rw_op] = true
+                rw_op_map[key].size[size] = true
+                rw_op_map[key].addr[addr] = true
+                rw_op_map[key].thr[thr] = true
+                if prev_target then
+                    rw_op_map[key].link["->" .. prev_target] = true
+                else
+                    rw_op_map[key].link['END'] = true
+                end
             else
-                error_map[key].link['END'] = true
+                -- Other errors.
+                local key = target .. ":" .. message
+                if not error_map[key] then
+                    error_map[key] = { link = {} }
+                end
+                if prev_target then
+                    error_map[key].link["->" .. prev_target] = true
+                else
+                    error_map[key].link['END'] = true
+                end
             end
             prev_target = string.match(target, ".*/(.+)")
         end
@@ -276,6 +297,19 @@ M.sanitizer_load_log = function(args)
     log_file_handle:close()
 
     local output_table = {}
+    -- print("rw_op_map:\n")
+    -- print(rw_op_map)
+    for key, value in pairs(rw_op_map) do
+        table.insert(output_table, string.format(key ..
+            ": %s of size %s at %s by thread %s: (%s)",
+            summarize_table_keys(value.rw_op, false),
+            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.addr, true),
+            summarize_table_keys(value.thr, false),
+            summarize_links(value.link)))
+    end
+    -- print("error_map:\n")
+    -- print(error_map)
     for key, value in pairs(error_map) do
         table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
