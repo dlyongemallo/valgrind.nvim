@@ -41,7 +41,7 @@ local summarize_table_keys = function(t, show_only_first_entry)
         table.insert(sorted_t, k)
         n = n + 1
     end
-    table.sort(sorted_t)
+    table.sort(sorted_t)  -- TODO: fix sorting
     if n == 1 then
         return sorted_t[1]
     elseif show_only_first_entry then
@@ -56,7 +56,7 @@ local summarize_links = function(link)
     for k, _ in pairs(link) do
         table.insert(sorted_links, k)
     end
-    table.sort(sorted_links)
+    table.sort(sorted_links)  -- TODO: fix sorting
     local summary = ""
     local prev_filename = ""
     local has_end = false
@@ -108,6 +108,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
     local output_table = {}
     local data_race_map = {}
     -- TODO: Show progress to the user somehow.
+    local num_errors = 0
     for _, e in pairs(error) do
         if not e.kind then goto not_error_continue end
         if not e.stack then goto not_error_continue end
@@ -170,6 +171,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
             end
             ::not_frame_continue::
         end
+        num_errors = num_errors + 1
         ::not_error_continue::
     end
     -- print("data_race_map:\n")
@@ -184,9 +186,12 @@ M.extract_valgrind_error = function(xml_file, error_file)
     end
     -- TODO: sort the line numbers properly.
     table.sort(output_table)
+    local num_output_lines = 0
     for _, output_line in pairs(output_table) do
         error_file_handle:write(output_line .. "\n")
+        num_output_lines = num_output_lines + 1
     end
+    vim.notify("Processed " .. num_errors .. " errors from '" .. xml_file .. "' into " .. num_output_lines .. " locations.")
     error_file_handle:close()
 end
 
@@ -248,6 +253,7 @@ M.sanitizer_load_log = function(args)
     local heap_allocation_map = {}
     local target
     local prev_target
+    local num_processed_lines = 0
     for line in log_file_handle:lines() do
         if starts_with(line, "allocated by") then
             message = last_addr .. " " .. line
@@ -324,6 +330,7 @@ M.sanitizer_load_log = function(args)
             populate_link(general_map[key].link, prev_target)
 
             ::finished_with_line_continue::
+            num_processed_lines = num_processed_lines + 1
             prev_target = string.match(target, ".*/(.+)")
         end
         ::not_source_file_continue::
@@ -367,8 +374,10 @@ M.sanitizer_load_log = function(args)
     end
     -- TODO: sort the line numbers properly.
     table.sort(output_table)
+    local num_output_lines = 0
     for _, output_line in pairs(output_table) do
         error_file_handle:write(output_line .. "\n")
+        num_output_lines = num_output_lines + 1
     end
     error_file_handle:close()
 
@@ -376,6 +385,9 @@ M.sanitizer_load_log = function(args)
     vim.bo.efm = "%f:%l:%m"
     vim.cmd("cfile " .. error_file)
     vim.bo.efm = efm
+
+    -- Inform user of some stats.
+    vim.notify("Processed " .. num_processed_lines .. " lines from '" .. log_file .. "' into " .. num_output_lines .. " locations.")
 
     -- print("Sanitizer error log written to: " .. error_file)
     vim.fn.delete(error_file)
