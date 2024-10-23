@@ -49,5 +49,17 @@ vim program.c
 :copen
 ```
 
+For sanitizers, you can do the following:
+
+```bash
+gcc -g [-fsanitize=address|-fsanitize=thread -lpthread.c] program.c -o ./program
+./program 2> program.sanitizer.log
+vim program.c
+```
+
+```vim
+:SanitizerLoadLog program.sanitizer.log
+```
+
 It is recommended to use the [Trouble](https://github.com/folke/trouble.nvim) plugin to display the quickfix list in a more useful way.
 
