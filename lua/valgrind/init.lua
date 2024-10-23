@@ -41,7 +41,7 @@ local summarize_table_keys = function(t, show_only_first_entry)
         table.insert(sorted_t, k)
         n = n + 1
     end
-    table.sort(sorted_t)  -- TODO: fix sorting
+    table.sort(sorted_t)
     if n == 1 then
         return sorted_t[1]
     elseif show_only_first_entry then
@@ -56,7 +56,7 @@ local summarize_links = function(link)
     for k, _ in pairs(link) do
         table.insert(sorted_links, k)
     end
-    table.sort(sorted_links)  -- TODO: fix sorting
+    table.sort(sorted_links)
     local summary = ""
     local prev_filename = ""
     local has_end = false
@@ -65,6 +65,7 @@ local summarize_links = function(link)
             has_end = true
         else
             local filename, line_number = string.match(full_link, "^(.*):(%d+)$")
+            line_number = line_number:match("^0*(%d+)$") -- remove leading zeros used for sorting
             if filename == prev_filename then
                 summary = summary .. "," .. line_number
             else
@@ -130,9 +131,9 @@ M.extract_valgrind_error = function(xml_file, error_file)
                 local output_line = f.dir .. "/"
                 target = f.file .. ":"
                 if f.line then
-                    target = target .. f.line
+                    target = target .. string.format("%06d", f.line) -- probably not going to edit million-line source files!
                 else
-                    target = target .. "1"
+                    target = target .. "000001"
                 end
                 output_line = output_line .. target .. ":"
                 if e.kind then
@@ -184,7 +185,6 @@ M.extract_valgrind_error = function(xml_file, error_file)
             summarize_table_keys(value.thr, false),
             summarize_links(value.link)))
     end
-    -- TODO: sort the line numbers properly.
     table.sort(output_table)
     local num_output_lines = 0
     for _, output_line in pairs(output_table) do
@@ -275,9 +275,14 @@ M.sanitizer_load_log = function(args)
                 goto not_source_file_continue
                 -- return
             end
-            if not string.match(target, "%S+:%d+") or not starts_with(target, "/home/") then -- TODO: Use git_root instead!
+            if not starts_with(target, "/home/") then -- TODO: Use git_root instead!
                 goto not_source_file_continue
             end
+            local filename, line_number = string.match(target, "(%S+):(%d+)")
+            if not filename or not line_number then
+                goto not_source_file_continue
+            end
+            target = filename .. ":" .. string.format("%06d", line_number)
 
             local key, rw_op, size, addr, thr, mutex
             rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
@@ -372,7 +377,6 @@ M.sanitizer_load_log = function(args)
     for key, value in pairs(general_map) do
         table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
-    -- TODO: sort the line numbers properly.
     table.sort(output_table)
     local num_output_lines = 0
     for _, output_line in pairs(output_table) do
