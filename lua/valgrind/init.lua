@@ -92,6 +92,15 @@ local summarize_links = function(link)
     return summary
 end
 
+local populate_link = function(link, prev_target)
+    if prev_target then
+        link["->" .. prev_target] = true
+    else
+        link['END'] = true
+    end
+
+end
+
 -- TODO: Investigate why this doesn't work on calls subsequent to the first call.
 M.extract_valgrind_error = function(xml_file, error_file)
     -- TODO: Use luarocks for this. See: https://github.com/theHamsta/nvim_rocks
@@ -112,7 +121,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
     if error.error and #error.error > 1 then
         error = error.error
     end
-    local output_table = {}
+    local general_map = {}
     local data_race_map = {}
     -- TODO: Show progress to the user somehow.
     local num_errors = 0
@@ -134,34 +143,23 @@ M.extract_valgrind_error = function(xml_file, error_file)
             for _, f in pairs(frame) do
                 if not f.dir or not f.file then goto not_file_continue end
                 if not starts_with(f.dir, "/home/") then goto not_file_continue end -- TODO: Use git_root instead!
-                local output_line = f.dir .. "/"
-                target = f.file .. ":"
                 -- Add leading zeroes to line numbers for sorting.
-                if f.line then
-                    target = target .. string.format("%06d", f.line) -- probably not going to edit million-line source files!
-                else
-                    target = target .. "000001"
-                end
-                output_line = output_line .. target .. ":"
+                target = f.dir .. "/" .. f.file .. ":" .. string.format("%06d", f.line or "1")
+                local message = ""
                 if e.kind then
-                    output_line = output_line .. "[" .. e.kind .. "] "
+                    message = message .. "[" .. e.kind .. "] "
                 end
                 if e.what then
-                    output_line = output_line .. e.what
+                    message = message .. e.what
                 elseif e.xwhat then
-                    output_line = output_line .. e.xwhat.text
+                    message = message .. e.xwhat.text
                 end
-                if prev_target then
-                    output_line = output_line .. " (->" .. prev_target .. ")"
-                else
-                    output_line = output_line .. " (END)" -- reached bottom of call stack
-                end
-                if output_line:find("%[Race%] Possible data race") then
+
+                local key, rw, size, addr, thr
+                rw, size, addr, thr = string.match(message,
+                        "^(.*):(%d+):%[Race%] Possible data race during (.*) of size (%d+) at (0x%x+) by thread (#%d+)")
+                if rw then
                     -- TODO: This should probably be controlled by a "compactify" option.
-                    local file, line, rw, size, addr, thr, link = string.match(output_line,
-                        "^(.*):(%d+):%[Race%] Possible data race during (.*) of size (%d+) at (0x%x+) by thread (#%d+) %((.*)%)")
-                    local key = file .. ":" .. line
-                    -- print(key)
                     if not data_race_map[key] then
                         data_race_map[key] = { rw = {}, size = {}, addr = {}, thr = {}, link = {} }
                     end
@@ -169,12 +167,18 @@ M.extract_valgrind_error = function(xml_file, error_file)
                     data_race_map[key].size[size] = true
                     data_race_map[key].addr[addr] = true
                     data_race_map[key].thr[thr] = true
-                    data_race_map[key].link[link] = true
+                    populate_link(data_race_map[key].link, prev_target)
 
                 else
-                    table.insert(output_table, output_line)
+                    -- Other general messages.
+                    key = target .. ":" .. message
+                    if not general_map[key] then
+                        general_map[key] = { link = {} }
+                    end
+                    populate_link(general_map[key].link, prev_target)
+
                 end
-                prev_target = target
+                prev_target = string.match(target, ".*/(.+)")
                 ::not_file_continue::
             end
             ::not_frame_continue::
@@ -182,6 +186,8 @@ M.extract_valgrind_error = function(xml_file, error_file)
         num_errors = num_errors + 1
         ::not_error_continue::
     end
+
+    local output_table = {}
     -- print("data_race_map:\n")
     -- print(data_race_map)
     for key, value in pairs(data_race_map) do
@@ -191,6 +197,9 @@ M.extract_valgrind_error = function(xml_file, error_file)
             summarize_table_keys(value.addr, true),
             summarize_table_keys(value.thr),
             summarize_links(value.link)))
+    end
+    for key, value in pairs(general_map) do
+        table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
     table.sort(output_table)
     local num_output_lines = 0
@@ -226,15 +235,6 @@ M.valgrind_load_xml = function(args)
 
     -- print("Valgrind error log written to: " .. error_file)
     vim.fn.delete(error_file)
-end
-
-local populate_link = function(link, prev_target)
-    if prev_target then
-        link["->" .. prev_target] = true
-    else
-        link['END'] = true
-    end
-
 end
 
 M.sanitizer_load_log = function(args)
