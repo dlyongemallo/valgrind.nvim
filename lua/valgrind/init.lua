@@ -34,10 +34,16 @@ local summarize_rw = function(rw)
     end
 end
 
-local summarize_table_keys = function(t, show_only_first_entry)
+local summarize_table_keys = function(t, show_only_first_entry, sort_by_numeric_value)
+    show_only_first_entry = show_only_first_entry or false
+    sort_by_numeric_value = sort_by_numeric_value or false
+
     local sorted_t = {}
     local n = 0
     for k, _ in pairs(t) do
+        if sort_by_numeric_value then
+            k = tonumber(k)
+        end
         table.insert(sorted_t, k)
         n = n + 1
     end
@@ -130,6 +136,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
                 if not starts_with(f.dir, "/home/") then goto not_file_continue end -- TODO: Use git_root instead!
                 local output_line = f.dir .. "/"
                 target = f.file .. ":"
+                -- Add leading zeroes to line numbers for sorting.
                 if f.line then
                     target = target .. string.format("%06d", f.line) -- probably not going to edit million-line source files!
                 else
@@ -180,9 +187,9 @@ M.extract_valgrind_error = function(xml_file, error_file)
     for key, value in pairs(data_race_map) do
         table.insert(output_table, string.format(key .. ":[Race] Possible data race during %s of size %s at %s by thread %s (%s)",
             summarize_rw(value.rw),
-            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.size, false, true),
             summarize_table_keys(value.addr, true),
-            summarize_table_keys(value.thr, false),
+            summarize_table_keys(value.thr),
             summarize_links(value.link)))
     end
     table.sort(output_table)
@@ -251,6 +258,7 @@ M.sanitizer_load_log = function(args)
     local rw_op_map = {}
     local mutex_created_map = {}
     local heap_allocation_map = {}
+    local leak_map = {}
     local target
     local prev_target
     local num_processed_lines = 0
@@ -282,9 +290,10 @@ M.sanitizer_load_log = function(args)
             if not filename or not line_number then
                 goto not_source_file_continue
             end
+            -- Add leading zeroes to line numbers for sorting.
             target = filename .. ":" .. string.format("%06d", line_number)
 
-            local key, rw_op, size, addr, thr, mutex
+            local key, rw_op, size, addr, thr, mutex, leak_type, num_objs
             rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
             if rw_op then
                 -- TODO: This should probably be controlled by a "compactify" option.
@@ -327,6 +336,20 @@ M.sanitizer_load_log = function(args)
                 goto finished_with_line_continue
             end
 
+            leak_type, size, num_objs = string.match(message, "^%s*(.*) leak of (%d+) byte%(s%) in (%d+) object%(s%) allocated from:$")
+            if leak_type then
+                -- Memory leak.
+                key = target
+                if not leak_map[key] then
+                    leak_map[key] = { leak_type = {}, size = {}, num_objs = {}, link = {} }
+                end
+                leak_map[key].leak_type[leak_type] = true
+                leak_map[key].size[size] = true
+                leak_map[key].num_objs[num_objs] = true
+                populate_link(leak_map[key].link, prev_target)
+                goto finished_with_line_continue
+            end
+
             -- Other general messages.
             key = target .. ":" .. message
             if not general_map[key] then
@@ -348,10 +371,10 @@ M.sanitizer_load_log = function(args)
     for key, value in pairs(rw_op_map) do
         table.insert(output_table, string.format(key ..
             ":%s of size %s at %s by thread %s: (%s)",
-            summarize_table_keys(value.rw_op, false),
-            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.rw_op),
+            summarize_table_keys(value.size, false, true),
             summarize_table_keys(value.addr, true),
-            summarize_table_keys(value.thr, false),
+            summarize_table_keys(value.thr),
             summarize_links(value.link)))
     end
     -- print("mutex_created_map:\n")
@@ -359,7 +382,7 @@ M.sanitizer_load_log = function(args)
     for key, value in pairs(mutex_created_map) do
         table.insert(output_table, string.format(key ..
             ":Mutex %s created: (%s)",
-            summarize_table_keys(value.mutex, false),
+            summarize_table_keys(value.mutex),
             summarize_links(value.link)))
     end
     -- print("heap_allocation_map:\n")
@@ -367,9 +390,19 @@ M.sanitizer_load_log = function(args)
     for key, value in pairs(heap_allocation_map) do
         table.insert(output_table, string.format(key ..
             ":Location is heap block of size %s at %s allocated by %s: (%s)",
-            summarize_table_keys(value.size, false),
+            summarize_table_keys(value.size, false, true),
             summarize_table_keys(value.addr, true),
-            summarize_table_keys(value.thr, false),
+            summarize_table_keys(value.thr),
+            summarize_links(value.link)))
+    end
+    -- print("leak_map:\n")
+    -- print(leak_map)
+    for key, value in pairs(leak_map) do
+        table.insert(output_table, string.format(key ..
+            ":%s leak of %s byte(s) in %s object(s) allocated from: (%s)",
+            summarize_table_keys(value.leak_type),
+            summarize_table_keys(value.size, false, true),
+            summarize_table_keys(value.num_objs, false, true),
             summarize_links(value.link)))
     end
     -- print("general_map:\n")
