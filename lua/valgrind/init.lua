@@ -123,6 +123,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
     end
     local general_map = {}
     local data_race_map = {}
+    local leak_map = {}
     -- TODO: Show progress to the user somehow.
     local num_errors = 0
     for _, e in pairs(error) do
@@ -142,7 +143,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
             local prev_target
             for _, f in pairs(frame) do
                 if not f.dir or not f.file then goto not_file_continue end
-                if not starts_with(f.dir, "/home/") then goto not_file_continue end -- TODO: Use git_root instead!
+                if not starts_with(f.dir, vim.fn.getcwd()) then goto not_file_continue end
                 -- Add leading zeroes to line numbers for sorting.
                 target = f.dir .. "/" .. f.file .. ":" .. string.format("%06d", f.line or "1")
                 local message = ""
@@ -155,11 +156,11 @@ M.extract_valgrind_error = function(xml_file, error_file)
                     message = message .. e.xwhat.text
                 end
 
-                local key, rw, size, addr, thr
+                local key, rw, size, addr, thr, leak_type, blocks, loss_record, total_records
                 rw, size, addr, thr = string.match(message,
-                        "^(.*):(%d+):%[Race%] Possible data race during (.*) of size (%d+) at (0x%x+) by thread (#%d+)")
+                        "^%[Race%] Possible data race during (.*) of size (%d+) at (0x%x+) by thread (#%d+)")
                 if rw then
-                    -- TODO: This should probably be controlled by a "compactify" option.
+                    key = target
                     if not data_race_map[key] then
                         data_race_map[key] = { rw = {}, size = {}, addr = {}, thr = {}, link = {} }
                     end
@@ -168,16 +169,34 @@ M.extract_valgrind_error = function(xml_file, error_file)
                     data_race_map[key].addr[addr] = true
                     data_race_map[key].thr[thr] = true
                     populate_link(data_race_map[key].link, prev_target)
-
-                else
-                    -- Other general messages.
-                    key = target .. ":" .. message
-                    if not general_map[key] then
-                        general_map[key] = { link = {} }
-                    end
-                    populate_link(general_map[key].link, prev_target)
-
+                    goto finished_with_frame_continue
                 end
+
+                leak_type, size, blocks, loss_record, total_records = string.match(message,
+                        "^%[Leak_(.*)%] (.+) bytes in (%d+) blocks .* in loss record (%d+) of (%d+)")
+                -- print("message: " .. message)
+                if size then
+                    key = target
+                    if not leak_map[key] then
+                        leak_map[key] = { leak_type = {}, size = {}, blocks = {}, loss_number = {}, total_losses = {}, link = {} }
+                    end
+                    leak_map[key].leak_type[leak_type] = true
+                    leak_map[key].size[size] = true
+                    leak_map[key].blocks[blocks] = true
+                    leak_map[key].loss_number[loss_record] = true
+                    leak_map[key].total_losses[total_records] = true
+                    populate_link(leak_map[key].link, prev_target)
+                    goto finished_with_frame_continue
+                end
+
+                -- Other general messages.
+                key = target .. ":" .. message
+                if not general_map[key] then
+                    general_map[key] = { link = {} }
+                end
+                populate_link(general_map[key].link, prev_target)
+
+                ::finished_with_frame_continue::
                 prev_target = string.match(target, ".*/(.+)")
                 ::not_file_continue::
             end
@@ -189,7 +208,7 @@ M.extract_valgrind_error = function(xml_file, error_file)
 
     local output_table = {}
     -- print("data_race_map:\n")
-    -- print(data_race_map)
+    -- print(vim.inspect(data_race_map))
     for key, value in pairs(data_race_map) do
         table.insert(output_table, string.format(key .. ":[Race] Possible data race during %s of size %s at %s by thread %s (%s)",
             summarize_rw(value.rw),
@@ -198,6 +217,19 @@ M.extract_valgrind_error = function(xml_file, error_file)
             summarize_table_keys(value.thr),
             summarize_links(value.link)))
     end
+    -- print("leak_map:\n")
+    -- print(vim.inspect(leak_map))
+    for key, value in pairs(leak_map) do
+        table.insert(output_table, string.format(key .. ":[Leak_%s] %s bytes in %s blocks in loss record %s of %s (%s)",
+            summarize_table_keys(value.leak_type, false),
+            summarize_table_keys(value.size, true, true),
+            summarize_table_keys(value.blocks, true, true),
+            summarize_table_keys(value.loss_number, true, true),
+            summarize_table_keys(value.total_losses, false, true),
+            summarize_links(value.link)))
+    end
+    -- print("general_map:\n")
+    -- print(vim.inspect(general_map))
     for key, value in pairs(general_map) do
         table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
@@ -283,7 +315,7 @@ M.sanitizer_load_log = function(args)
                 goto not_source_file_continue
                 -- return
             end
-            if not starts_with(target, "/home/") then -- TODO: Use git_root instead!
+            if not starts_with(target, vim.fn.getcwd()) then
                 goto not_source_file_continue
             end
             local filename, line_number = string.match(target, "(%S+):(%d+)")
@@ -296,7 +328,6 @@ M.sanitizer_load_log = function(args)
             local key, rw_op, size, addr, thr, mutex, leak_type, num_objs
             rw_op, size, addr, thr = string.match(message, "^%s*(.*) of size (%d+) at (0x%x+) by (.*):$")
             if rw_op then
-                -- TODO: This should probably be controlled by a "compactify" option.
                 -- "Read/Write/Previous read/Previous write" operations.
                 key = target
                 if not rw_op_map[key] then
@@ -367,7 +398,7 @@ M.sanitizer_load_log = function(args)
 
     local output_table = {}
     -- print("rw_op_map:\n")
-    -- print(rw_op_map)
+    -- print(vim.inspect(rw_op_map))
     for key, value in pairs(rw_op_map) do
         table.insert(output_table, string.format(key ..
             ":%s of size %s at %s by thread %s: (%s)",
@@ -378,7 +409,7 @@ M.sanitizer_load_log = function(args)
             summarize_links(value.link)))
     end
     -- print("mutex_created_map:\n")
-    -- print(mutex_created_map)
+    -- print(vim.inspect(mutex_created_map))
     for key, value in pairs(mutex_created_map) do
         table.insert(output_table, string.format(key ..
             ":Mutex %s created: (%s)",
@@ -386,7 +417,7 @@ M.sanitizer_load_log = function(args)
             summarize_links(value.link)))
     end
     -- print("heap_allocation_map:\n")
-    -- print(heap_allocation_map)
+    -- print(vim.inspect(heap_allocation_map))
     for key, value in pairs(heap_allocation_map) do
         table.insert(output_table, string.format(key ..
             ":Location is heap block of size %s at %s allocated by %s: (%s)",
@@ -396,7 +427,7 @@ M.sanitizer_load_log = function(args)
             summarize_links(value.link)))
     end
     -- print("leak_map:\n")
-    -- print(leak_map)
+    -- print(vim.inspect(leak_map))
     for key, value in pairs(leak_map) do
         table.insert(output_table, string.format(key ..
             ":%s leak of %s byte(s) in %s object(s) allocated from: (%s)",
@@ -406,7 +437,7 @@ M.sanitizer_load_log = function(args)
             summarize_links(value.link)))
     end
     -- print("general_map:\n")
-    -- print(general_map)
+    -- print(vim.inspect(general_map))
     for key, value in pairs(general_map) do
         table.insert(output_table, string.format(key .. " (%s)", summarize_links(value.link)))
     end
