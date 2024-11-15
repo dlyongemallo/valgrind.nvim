@@ -299,7 +299,12 @@ M.sanitizer_load_log = function(args)
             message = last_addr .. " " .. line
             prev_target = nil
         elseif not starts_with(line, "    #") then
-            message = line
+            local maybe_message = string.match(line, "==%d+==ERROR: .*Sanitizer: (.*)")
+            if maybe_message then
+                message = maybe_message
+            else
+                message = line
+            end
             prev_target = nil
             local addr = string.match(line, "(0x%x+)")
             if addr then
